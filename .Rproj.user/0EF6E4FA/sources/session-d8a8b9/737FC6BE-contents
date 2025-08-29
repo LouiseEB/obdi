@@ -78,5 +78,5 @@ Although the two cohorts are stored and processed in **separate environments** (
 
 ---
 
-**Note:** This repository contains the analysis scripts and functions, but **raw data are not shared** due to cohort-specific access restrictions.  
+**Note:** This repository contains the analysis scripts and functions, but **raw data are not shared** due to cohort-specific access restrictions. Final results, figures, and manuscript are not shared in this repository.  
 
