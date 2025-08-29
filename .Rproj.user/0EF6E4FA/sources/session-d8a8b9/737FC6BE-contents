@@ -9,7 +9,7 @@ Although the two cohorts are stored and processed in **separate environments** (
 ---
 
 ## Directory Structure
-
+```
 ├── data-raw/
 │ └── UKB import raw data and define variables.R # Import UKB dataset and create variables from ICD and OPCS codes
 │
@@ -22,32 +22,34 @@ Although the two cohorts are stored and processed in **separate environments** (
 ├── DESCRIPTION # Metadata for reproducibility
 ├── obdi.Rproj # RStudio project file
 └── README.md # Project documentation (this file)
----
-
+```
 
 ## Analysis Workflow
 
 1. **Functions (`R/functions.R`)**  
    - Contains all reusable helper functions.  
-   - These are sourced at the beginning of the analysis scripts.  
+   - These are sourced at the beginning of the analysis scripts.
    - Functions cover tasks such as:  
-     - Harmonizing variable names  
-     - Defining derived variables (e.g., BMI categories, smoking, education)  
-     - Survival analyses and cumulative incidence estimation  
-     - Forest plots, Poisson regression, spline models  
+     - Outputting results, plots and counts for the analyses
+   - There is a function for each display item in the manuscript (table of characteristics and figures).
+   - An additional function to extract the highest level of education for each UK Biobank participant used in the data wrangling and production of results script.
+   
 
-2. **Data Import & Harmonization (`data-raw/UKB import raw data and define variables.R`)**  
+2. **Data Import(`data-raw/UKB import raw data and define variables.R`)**  
    - Downloads and imports raw UKB data (`dataset.csv`).  
-   - Maps UKB variable names to the same harmonized set used in CGPS.  
-   - Ensures comparability of derived variables (e.g., BMI, diabetes definitions, follow-up).  
+   - Creates ASCVD and diabetes variables from ICD and OPCS codes
+   - Saves and uploads main data for the project to UKB RAP
+  
 
 3. **Data Wrangling & Results (`doc/data wrangling and production of results.R`)**  
-   - Performs all transformations required for analysis.  
-   - Generates key analytic variables:  
+   - Performs all transformations of data required for analysis.  
+   - Defines key analytic variables:  
      - **DMall** (default; includes all diabetes types)  
      - **dm2** (alternative; type 2 diabetes only)  
      - Obesity categories  
-     - Risk group definitions (3x2 matrix of DM × obesity status)  
+     - Competing risks
+     - Risk group definitions (3x2 matrix of BMI category × diabetes status)
+     - Covariates as educational level, income, and current smoking     - 
    - Produces all results (tables and figures), written to `.csv` for reproducibility.  
 
 ---
@@ -62,7 +64,7 @@ Although the two cohorts are stored and processed in **separate environments** (
 
 ## Outputs
 
-- Cleaned, harmonized analysis datasets (not shared in this repo).  
+- Cleaned, harmonized analysis datasets (not shared in this repo).(The final figures in the manuscript are created from these results files)
 - Results tables exported as `.csv` into manuscript folders.  
 - Figures generated from results scripts (e.g., forest plots, spline curves).  
 
@@ -70,9 +72,9 @@ Although the two cohorts are stored and processed in **separate environments** (
 
 ## Reproducibility
 
-- All packages required are listed in the scripts (`tidyverse`, `survival`, `gtsummary`, `ggsurvfit`, etc.).  
+- All packages required are listed in the scripts 
 - `DESCRIPTION` is used to keep track of project metadata.  
-- Analyses are run in separate environments (UKB secure environment vs CGPS secure infrastructure), but results scripts and functions are identical.  
+- Analyses are run in separate environments (UKB secure environment vs CGPS secure infrastructure), but results scripts and functions are universal.  
 
 ---
 
