@@ -1,34 +1,80 @@
-TODO: Add more to the title of your project here
+# Obesity and diabetes alone and combined on risk of cardiovascular disease in women and men: cohort studies in Denmark and the UK
 
-# obdi:
+## Overview
 
-TODO: Give a brief description of what your project is about
+This project contains the data wrangling, analysis, and results generation for studies of obesity and diabetes in the CGPS and UK Biobank cohorts. This project investigates the combined effects of diabetes and obesity on cardiovascular disease risk, using data from both the **Copenhagen General Population Study (CGPS)** and the **UK Biobank (UKB)**.  
 
-This project...
+Although the two cohorts are stored and processed in **separate environments** (UKB within its secure research environment using DNAnexus/UKB RAP, CGPS within local secure infrastructure), the analysis workflow is designed to be **parallel and reproducible across both datasets**.  
 
-# Brief description of folder and file contents
+---
 
-TODO: As project evolves, add brief description of what is inside the data, doc and R folders.
+## Directory Structure
 
-The following folders contain:
+├── data-raw/
+│ └── UKB import raw data and define variables.R # Import UKB dataset and create variables from ICD and OPCS codes
+│
+├── doc/
+│ └── data wrangling and production of results.R # Main script for data preparation & results generation
+│
+├── R/
+│ └── functions.R # Shared functions used across CGPS and UKB analyses
+│
+├── DESCRIPTION # Metadata for reproducibility
+├── obdi.Rproj # RStudio project file
+└── README.md # Project documentation (this file)
+---
 
-- `data/`:
-- `doc/`:
-- `R/`:
 
-# Installing project R package dependencies
+## Analysis Workflow
 
-If dependencies have been managed by using `usethis::use_package("packagename")`
-through the `DESCRIPTION` file, installing dependencies is as easy as opening the
-`obdi.Rproj` file and running this command in the console:
+1. **Functions (`R/functions.R`)**  
+   - Contains all reusable helper functions.  
+   - These are sourced at the beginning of the analysis scripts.  
+   - Functions cover tasks such as:  
+     - Harmonizing variable names  
+     - Defining derived variables (e.g., BMI categories, smoking, education)  
+     - Survival analyses and cumulative incidence estimation  
+     - Forest plots, Poisson regression, spline models  
 
-    # install.packages("remotes")
-    remotes::install_deps()
+2. **Data Import & Harmonization (`data-raw/UKB import raw data and define variables.R`)**  
+   - Downloads and imports raw UKB data (`dataset.csv`).  
+   - Maps UKB variable names to the same harmonized set used in CGPS.  
+   - Ensures comparability of derived variables (e.g., BMI, diabetes definitions, follow-up).  
 
-You'll need to have remotes installed for this to work.
+3. **Data Wrangling & Results (`doc/data wrangling and production of results.R`)**  
+   - Performs all transformations required for analysis.  
+   - Generates key analytic variables:  
+     - **DMall** (default; includes all diabetes types)  
+     - **dm2** (alternative; type 2 diabetes only)  
+     - Obesity categories  
+     - Risk group definitions (3x2 matrix of DM × obesity status)  
+   - Produces all results (tables and figures), written to `.csv` for reproducibility.  
 
-# Resource
+---
 
-For more information on this folder and file workflow and setup, check
-out the [prodigenr](https://rostools.github.io/prodigenr) online
-documentation.
+## Running the Analyses
+
+- **Default**: Analyses are run with `DMall` as the diabetes variable.  
+- **Alternative**: To restrict to type 2 diabetes only, set `dm_c = "dm2"` in the results script.  
+- Both CGPS and UKB scripts rely on the same functions and produce **parallel outputs**, allowing direct comparability across the two cohorts.  
+
+---
+
+## Outputs
+
+- Cleaned, harmonized analysis datasets (not shared in this repo).  
+- Results tables exported as `.csv` into manuscript folders.  
+- Figures generated from results scripts (e.g., forest plots, spline curves).  
+
+---
+
+## Reproducibility
+
+- All packages required are listed in the scripts (`tidyverse`, `survival`, `gtsummary`, `ggsurvfit`, etc.).  
+- `DESCRIPTION` is used to keep track of project metadata.  
+- Analyses are run in separate environments (UKB secure environment vs CGPS secure infrastructure), but results scripts and functions are identical.  
+
+---
+
+**Note:** This repository contains the analysis scripts and functions, but **raw data are not shared** due to cohort-specific access restrictions.  
+
