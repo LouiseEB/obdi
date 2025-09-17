@@ -1,0 +1,1327 @@
+### FILE: README.md ###
+
+
+# Obesity and diabetes alone and combined on risk of cardiovascular disease in women and men: cohort studies in Denmark and the UK
+
+## Overview
+
+This project contains the data wrangling, analysis, and results generation for studies of obesity and diabetes in the CGPS and UK Biobank cohorts. This project investigates the combined effects of diabetes and obesity on cardiovascular disease risk, using data from both the **Copenhagen General Population Study (CGPS)** and the **UK Biobank (UKB)**.
+
+Although the two cohorts are stored and processed in **separate environments** (UKB within its secure research environment using DNAnexus/UKB RAP, CGPS within local secure infrastructure), the analysis workflow is designed to be **parallel and reproducible across both datasets**.
+
+---
+
+## Directory Structure
+```
+├── data-raw/
+│ └── UKB import raw data and define variables.R # Import UKB dataset and create variables from ICD and OPCS codes
+│
+├── doc/
+│ └── data wrangling and production of results.R # Main script for data preparation & results generation
+│
+├── R/
+│ └── functions.R # Shared functions used across CGPS and UKB analyses
+│
+├── DESCRIPTION # Metadata for reproducibility
+├── obdi.Rproj # RStudio project file
+└── README.md # Project documentation (this file)
+```
+
+## Analysis Workflow
+
+1. **Functions (`R/functions.R`)**
+   - Contains all reusable helper functions.
+   - These are sourced at the beginning of the analysis scripts.
+   - Functions cover tasks such as:
+     - Outputting results, plots and counts for the analyses
+   - There is a function for each display item in the manuscript (table of characteristics and figures).
+   - An additional function to extract the highest level of education for each UK Biobank participant used in the data wrangling and production of results script.
+
+
+2. **Data Import(`data-raw/UKB import raw data and define variables.R`)**
+   - Downloads and imports raw UKB data (`dataset.csv`).
+   - Creates ASCVD and diabetes variables from ICD and OPCS codes
+   - Saves and uploads main data for the project to UKB RAP
+
+
+3. **Data Wrangling & Results (`doc/data wrangling and production of results.R`)**
+   - Performs all transformations of data required for analysis.
+   - Defines key analytic variables:
+     - **DMall** (default; includes all diabetes types)
+     - **dm2** (alternative; type 2 diabetes only)
+     - Obesity categories
+     - Competing risks
+     - Risk group definitions (3x2 matrix of BMI category × diabetes status)
+     - Covariates as educational level, income, and current smoking     -
+   - Produces all results (tables and figures), written to `.csv` for reproducibility.
+
+---
+
+## Running the Analyses
+
+- **Default**: Analyses are run with `DMall` as the diabetes variable.
+- **Alternative**: To restrict to type 2 diabetes only, set `dm_c = "dm2"` in the results script.
+- Both CGPS and UKB scripts rely on the same functions and produce **parallel outputs**, allowing direct comparability across the two cohorts.
+
+---
+
+## Outputs
+
+- Cleaned, harmonized analysis datasets (not shared in this repo).(The final figures in the manuscript are created from these results files)
+- Results tables exported as `.csv` into manuscript folders.
+- Figures generated from results scripts (e.g., forest plots, spline curves).
+
+---
+
+## Reproducibility
+
+- All packages required are listed in the scripts
+- `DESCRIPTION` is used to keep track of project metadata.
+- Analyses are run in separate environments (UKB secure environment vs CGPS secure infrastructure), but results scripts and functions are universal.
+
+---
+
+**Note:** This repository contains the analysis scripts and functions, but **raw data are not shared** due to cohort-specific access restrictions. Final results, figures, and manuscript are not shared in this repository.
+
+
+
+### FILE: data-raw/UKB import raw data and define variables.R ###
+
+
+# UKB import raw data and define variables
+
+# - Raw data, containing baseline data and ICD and OPCS codes, previously exported on the UKB RAP, is loaded
+# - ICD and OPCS cols are split and the ascvd and diabetes variables are made
+# - ascvd and diabetes variables are added to the main dataset which is saved to the UKB RAP
+
+
+# ------------------------------------------------------
+# Download raw data files from DNAnexus (command line)
+# ------------------------------------------------------
+# Example: dx download "table-exporter_2025-03-05_12-09-27_data.csv" \
+#                 "table-exporter_2025-03-06_10-37-19_data.csv" \
+#                 "table-exporter_2025-03-18_08-25-49_data.csv" \
+#                 "table-exporter_2025-03-18_11-43-17_data.csv" \
+#                 -o "data-raw"
+#
+
+# ------------------------------------------------------
+# Install and load required R packages
+# ------------------------------------------------------
+install.packages("here")        # For managing file paths relative to project root
+install.packages("tidyverse")   # Core data manipulation and visualization package suite
+install.packages("janitor")     # For cleaning column names and simple tabulations
+
+library(tidyverse)
+# ------------------------------------------------------
+# Load raw datasets exported in different steps from UKB RAP
+# ------------------------------------------------------
+# Main clinical dataset (drop main ICD and main OPCS raw strings. Correct ICD and OPCS variables will be loaded in the next step.)
+full_data <- read.csv(here::here("obdi", "data-raw", "table-exporter_2025-03-05_12-09-27_data.csv")) %>%
+    select(-matches("main.icd"), -matches("operative_procedures_main_opcs"))
+
+# ICD/OPCS data
+icd_op <- read.csv(here::here("obdi", "data-raw", "table-exporter_2025-03-06_10-37-19_data.csv"))
+
+# Extra participant variables
+addvars <- read.csv(here::here("obdi", "data-raw", "table-exporter_2025-03-18_08-25-49_data.csv"))
+
+# HbA1c measures from baseline and first follow-up instances
+hba1c <- read.csv(here::here("obdi", "data-raw", "table-exporter_2025-03-18_11-43-17_data.csv")) %>%
+    select(Participant.ID, Glycated.haemoglobin..HbA1c....Instance.0, Glycated.haemoglobin..HbA1c....Instance.1)
+
+# ------------------------------------------------------
+# Construct working dataset
+# ------------------------------------------------------
+# Full join across datasets and name cleaning:
+dataset <- full_join(full_data, icd_op) %>%
+  full_join(addvars) %>%
+  full_join(hba1c) %>%
+  janitor::clean_names()
+
+
+# Export intermediate dataset
+write.csv(dataset, "dataset.csv", row.names = F, quote = F)
+
+# Terminal upload: dx upload dataset.csv
+
+# Remove intermediate objects to free memory
+rm(full_data, icd_op, addvars, hba1c)
+
+
+# ------------------------------------------------------
+# Function to split ICD/OPCS columns into multiple fields
+# ------------------------------------------------------
+# UKB stores ICD/OPCS codes concatenated with "|" as delimiter.
+# This function expands such fields into separate array-style columns.
+split_icd_columns <- function(data, icd_col_name) {
+    max_instances <- data[[icd_col_name]] %>%
+        replace_na("") %>%
+        str_count("\\|") %>%
+        max(na.rm = TRUE) + 1  # maximum number of codes per participant
+
+    data <- data %>%
+        separate(
+            icd_col_name,
+            into = paste0(icd_col_name, "_array_", 0:(max_instances - 1)),
+            sep = "\\|",
+            fill = "right"
+        )
+
+    return(data)
+}
+
+# Apply splitting to ICD-10, ICD-9, and OPCS columns
+dataset <- dataset %>%
+    split_icd_columns("diagnoses_icd10") %>%
+    split_icd_columns("diagnoses_icd9") %>%
+    split_icd_columns("operative_procedures_opcs4") %>%
+    split_icd_columns("operative_procedures_opcs3")
+
+# ------------------------------------------------------
+# Define ICD-10, ICD-9 and OPCS codes of interest, run separately for ASCVD and
+# diabetes (comment out the irrelevant one while running code)
+# ------------------------------------------------------
+# ASCVD-related ICD-10 codes
+icd10_codes <- c("DE10.5", "DE11.5", "DE13.5", "DE14.5", "G45", "DI20", "DI21",
+                 "DI22", "DI23", "DI24", "DI25", "I63", "I69.3",
+                 "DI70.2", "DI70.2A", "DI73.9", "L97")
+icd10_codes <- str_replace(icd10_codes, "^D", "")  # remove "D" prefix if present
+
+
+# ASCVD-related ICD-9 codes
+icd9_codes <- c("413", "410", "4297", "411", "412", "414", "433",
+                "434", "435", "4377", "2497", "2507", "4402", "7071", "7079")
+
+# ASCVD-related OPCS-4 procedure codes (revascularisation etc.)
+opcs4_codes <- c("K40", "K41", "K42", "K43", "K44", "K45", "K46", "K48", "K49", "K50", "K75")
+
+
+# # Diabetes-related ICD-10 codes
+# icd10_codes <- c("E10", "E11", "E12", "E13", "E14", "H36.0",
+#                  "O24.0", "O24.1", "O24.2", "O24.3", "O24.5", "O24.9")
+#
+# # ICD-9 diabetes codes
+# icd9_codes <- c("250", "3620", "3572", "249")
+
+# ------------------------------------------------------
+# Function to process diagnosis/procedure codes
+# ------------------------------------------------------
+# Extracts participants with specified codes, reshapes data to long format,
+# and keeps date of first occurrence.
+process_codes <- function(
+        codes = icd10_codes,
+        prefix = "diagnoses_icd10",
+        date_prefix = "date_of_first_in_patient_diagnosis_icd10",
+        row_range,
+        new_col_name = "ascvd"
+) {
+    pattern <- paste0("^(", paste0(codes, collapse = "|"), ")")
+
+    dataset[row_range, ] %>%
+        select(participant_id, starts_with(prefix), starts_with(date_prefix)) %>%
+        pivot_longer(
+            cols = -participant_id,
+            names_to = c(".value", "array_index"),
+            names_pattern = "(.*)_array_(\\d+)"
+        ) %>%
+        filter(!is.na(!!sym(prefix)), !!sym(prefix) != "") %>%
+        mutate(
+            !!sym(new_col_name) := as.integer(str_detect(!!sym(prefix), pattern))
+        ) %>%
+        filter(!!sym(new_col_name) == 1) %>%
+        rename(
+            dia_proc = !!sym(prefix),
+            date = !!sym(paste0(date_prefix))
+        ) %>%
+        mutate(date = as_date(date))
+}
+
+# ------------------------------------------------------
+# Identify ASCVD cases (ICD-10, ICD-9, OPCS)
+# ------------------------------------------------------
+# Split into batches to handle large dataset sizes (UKB ~500k participants)
+icd10_batch1 <- process_codes(new_col_name = "ascvd", codes = icd10_codes, prefix = "diagnoses_icd10", row_range = 1:200000)
+icd10_batch2 <- process_codes(new_col_name = "ascvd", codes = icd10_codes, prefix = "diagnoses_icd10", row_range = 200001:400000)
+icd10_batch3 <- process_codes(new_col_name = "ascvd", codes = icd10_codes, prefix = "diagnoses_icd10", row_range = 400001:502129)
+
+icd9_batch1 <- process_codes(new_col_name = "ascvd", codes = icd9_codes, prefix = "diagnoses_icd9", row_range = 1:200000)
+icd9_batch2 <- process_codes(new_col_name = "ascvd", codes = icd9_codes, prefix = "diagnoses_icd9", row_range = 200001:400000)
+icd9_batch3 <- process_codes(new_col_name = "ascvd", codes = icd9_codes, prefix = "diagnoses_icd9", row_range = 400001:502129)
+
+opcs4_batch1 <- process_codes(new_col_name = "ascvd", codes = opcs4_codes, prefix = "operative_procedures_opcs4", row_range = 1:200000 )
+opcs4_batch2 <- process_codes(new_col_name = "ascvd", codes = opcs4_codes, prefix = "operative_procedures_opcs4", row_range = 200001:400000)
+opcs4_batch3 <- process_codes(new_col_name = "ascvd", codes = opcs4_codes, prefix = "operative_procedures_opcs4", row_range = 400001:502129)
+
+# Combine and filter ASCVD diagnoses
+ascvd_col2 <- bind_rows(icd10_batch1, icd10_batch2, icd10_batch3,
+                        icd9_batch1, icd9_batch2, icd9_batch3,
+                        opcs4_batch1, opcs4_batch2, opcs4_batch3) %>%
+    filter(dia_proc != "4309 Subarachnoid haemorrhage",   # Exclude haemorrhagic stroke
+           dia_proc != "7854 Gangrene") %>%               # Exclude nonspecific gangrene
+    group_by(participant_id) %>%
+    arrange(date) %>%
+    slice_head(n = 1) %>%                                 # Keep earliest event
+    ungroup() %>%
+    rename(ascvd_date = date,
+           ascvd_array_index = array_index,
+           ascvd_dia_proc = dia_proc) %>%
+    arrange(participant_id)
+
+# Save ASCVD dataset
+write_csv(ascvd_col2, "obdi/data-raw/ascvd_col2.csv")
+
+# Terminal upload: dx upload ascvd_col2.csv
+# ------------------------------------------------------
+# Identify Diabetes Mellitus (all types) cases
+# ------------------------------------------------------
+icd10_batch1 <- process_codes(new_col_name = "dmall", codes = icd10_codes, prefix = "diagnoses_icd10", row_range = 1:200000)
+icd10_batch2 <- process_codes(new_col_name = "dmall", codes = icd10_codes, prefix = "diagnoses_icd10", row_range = 200001:400000)
+icd10_batch3 <- process_codes(new_col_name = "dmall", codes = icd10_codes, prefix = "diagnoses_icd10", row_range = 400001:502129)
+
+icd9_batch1 <- process_codes(new_col_name = "dmall", codes = icd9_codes, prefix = "diagnoses_icd9", row_range = 1:200000)
+icd9_batch2 <- process_codes(new_col_name = "dmall", codes = icd9_codes, prefix = "diagnoses_icd9", row_range = 200001:400000)
+icd9_batch3 <- process_codes(new_col_name = "dmall", codes = icd9_codes, prefix = "diagnoses_icd9", row_range = 400001:502129)
+
+dmall_col <- bind_rows(icd10_batch1, icd10_batch2, icd10_batch3,
+                       icd9_batch1, icd9_batch2, icd9_batch3) %>%
+    group_by(participant_id) %>%
+    arrange(date) %>%
+    slice_head(n = 1) %>%
+    ungroup() %>%
+    rename(dmall_date = date,
+           dmall_array_index = array_index,
+           dmall_source = dia_proc) %>%
+    arrange(participant_id)
+
+# Save DM dataset
+write_csv(dmall_col, "obdi/data-raw/dmall_col.csv")
+
+# Terminal upload: dx upload dmall_col.csv
+
+# ------------------------------------------------------
+# Merge ASCVD and DM variables into main dataset
+# ------------------------------------------------------
+# Download prepared event datasets back into R session
+# dx download dataset.csv
+# dx download "ascvd_col2.csv" "dmall_col.csv" -o "obdi/data-raw"
+
+# Reload cleaned base dataset
+dataset <- read.csv(here::here("obdi", "data-raw", "dataset.csv"))
+
+# Reload ASCVD and DM datasets (dates in proper format)
+ascvd_col2 <- read.csv(here::here("obdi","data-raw", "ascvd_col2.csv")) %>%
+    mutate(ascvd_date = as_date(ascvd_date))
+dmall_col <- read.csv(here::here("obdi","data-raw", "dmall_col.csv")) %>%
+    mutate(dmall_date = as_date(dmall_date))
+
+# ------------------------------------------------------
+# Construct final dataset with outcomes
+# ------------------------------------------------------
+dataset_diagnoses <- dataset %>%
+    left_join(ascvd_col2) %>%
+    mutate(date_lost_to_follow_up = as_date(date_lost_to_follow_up),
+           date_of_death = as_date(date_of_death),
+           # Define ASCVD indicator and censoring
+           ascvd = case_when(
+               is.na(ascvd) ~ 0,
+               ascvd_date > as_date("2022-05-31") ~ 0,
+               ascvd == 1 & date_lost_to_follow_up < ascvd_date ~ 0,
+               TRUE ~ ascvd),
+           ascvd_date = case_when(
+               ascvd == 0 & !is.na(date_of_death) ~ date_of_death,
+               ascvd == 0 & is.na(date_of_death) ~ as_date("2022-05-31"),
+               is.na(ascvd_date) & ascvd == 1 ~ NA,
+               TRUE ~ ascvd_date),
+           ascvd_date = case_when(
+               date_lost_to_follow_up < ascvd_date ~ date_lost_to_follow_up,
+               ascvd_date > as_date("2022-05-31") ~ as_date("2022-05-31"),
+               TRUE ~ ascvd_date)) %>%
+    left_join(dmall_col) %>%
+    mutate(date_lost_to_follow_up = as_date(date_lost_to_follow_up),
+           # Define DM indicator and censoring
+           dmall = case_when(
+               is.na(dmall) ~ 0,
+               dmall_date > as_date("2022-05-31") ~ 0,
+               dmall == 1 & date_lost_to_follow_up < dmall_date ~ 0,
+               TRUE ~ dmall),
+           dmall_date = case_when(
+               dmall == 0 & !is.na(date_of_death) ~ date_of_death,
+               dmall == 0 & is.na(date_of_death) ~ as_date("2022-05-31"),
+               is.na(dmall_date) & dmall == 1 ~ NA,
+               TRUE ~ dmall_date),
+           dmall_date = case_when(
+               date_lost_to_follow_up < dmall_date ~ date_lost_to_follow_up,
+               dmall_date > as_date("2022-05-31") ~ as_date("2022-05-31"),
+               TRUE ~ dmall_date))
+
+
+# Save final dataset
+write_csv(dataset_diagnoses, "dataset.csv")
+
+# Delete intermediary data from UKB RAP
+# Terminal upload final dataset: dx upload dataset.csv
+
+
+
+### FILE: doc/data wrangling and production of results.R ###
+
+
+#---------------------------------------------
+# RESULTS SCRIPT WITH COMMENTED STEPS
+#---------------------------------------------
+
+# Install and load relevant packages for data manipulation, analysis, and reporting
+install.packages("xfun")
+install.packages("here")
+install.packages("tidyverse")
+install.packages(c("ggsurvfit", "gt"))
+install.packages("survival")
+install.packages("gtsummary")
+install.packages("rms")
+install.packages("glue")
+install.packages("kableExtra")
+
+library(xfun)       # Utility functions for R
+library(glue)       # For constructing strings
+library(tidyverse)  # For data wrangling (dplyr, ggplot2, etc.)
+library(survival)   # Survival analysis
+library(ggsurvfit)  # Plotting survival curves
+library(broom)      # Tidy model outputs
+library(rms)        # Regression modeling strategies
+library(gtsummary)  # Summary tables
+library(gt)         # Presentation of tables
+library(kableExtra) # Enhanced table formatting
+
+# Source custom functions from separate R script
+source(here::here("R/functions.R"))
+
+#---------------------------------------------
+# Set analysis type
+#---------------------------------------------
+# Choose between "dm2" (type 2 diabetes) or "DMall" (all diabetes types)
+dm_c = "DMall"
+
+# Choose the risk variable depending on diabetes type
+if(dm_c == "DMall"){risk_c = "risk_var"}
+if(dm_c == "dm2"){risk_c = "risk_vardm2"}
+
+#---------------------------------------------
+# Define education levels for harmonization
+#---------------------------------------------
+edu_levels <- c(
+    "None of the above",
+    "O levels/GCSEs or equivalent",
+    "CSEs or equivalent",
+    "A levels/AS levels or equivalent",
+    "NVQ or HND or HNC or equivalent",
+    "Other professional qualifications eg: nursing, teaching",
+    "College or University degree",
+    "Prefer not to answer"
+)
+
+#---------------------------------------------
+# Read and wrangle dataset
+#---------------------------------------------
+dataset <- read.csv(here::here("data-raw", "dataset.csv"))
+
+data <- dataset %>%
+    mutate(
+        # Convert DMall to factor
+        DMall = as_factor(dmall),
+        DMall_dato = dmall_date,
+
+        # Create dm2 variable based on specific diagnosis codes
+        dm2 = case_when(
+            DMall == 0 ~ 0,
+            str_starts(dmall_source, "E11") ~ 1,
+            str_starts(dmall_source, "O241") ~ 1,
+            str_starts(dmall_source, "25000") ~1,
+            TRUE ~ 0
+        ),
+
+        # Basic demographics
+        alder = age_when_attended_assessment_centre_instance_0,
+        bmi = body_mass_index_bmi_instance_0_participant_p21001_i0,
+
+        # Categorize BMI into standard groups
+        bmikat = case_when(
+            bmi < 18.5 ~ 1,
+            bmi >= 18.5 & bmi < 25 ~ 0,
+            bmi >= 25 & bmi < 30 ~ 2,
+            bmi >= 30 ~ 3
+        ),
+
+        # Blood pressure and lab measurements
+        systolic = systolic_blood_pressure_automated_reading_instance_0_array_0,
+        diastolic = diastolic_blood_pressure_automated_reading_instance_0_array_0,
+        ldl = ldl_direct_instance_0,
+        hdl = hdl_cholesterol_instance_0,
+        trig = triglycerides_instance_0,
+        glucose = glucose_instance_0_participant_p30740_i0,
+        hscrp = c_reactive_protein_instance_0,
+
+        # Medication indicator for lipid-lowering drugs
+        lipid_lowering = case_when(
+            str_detect(
+                medication_for_cholesterol_blood_pressure_or_diabetes_instance_0,
+                "^Cholesterol"
+            ) |
+                str_detect(
+                    medication_for_cholesterol_blood_pressure_diabetes_or_take_exogenous_hormones_instance_0,
+                    "^Cholesterol"
+                ) ~ 1,
+            TRUE ~  0
+        ),
+
+        # Smoking status (current smoker = 1)
+        v37 = case_when(
+            str_detect(current_tobacco_smoking_instance_0, "^(Yes|Only)") ~ 1,
+            TRUE ~ 0
+        ),
+
+        # Encode sex as numeric (Male=1, Female=2)
+        sex = case_when(sex == "Female" ~ 2, sex == "Male" ~ 1),
+
+        # Follow-up time for ASCVD in years
+        fu_ascvd = as.numeric(
+            as_date(ascvd_date) - as_date(date_of_attending_assessment_centre_instance_0)
+        ) / 365.25,
+
+        # Death indicator and death date
+        dod = case_when(
+            is.na(date_of_death) ~ 0,
+            !is.na(date_of_death) ~ 1,
+            reason_lost_to_follow_up == "Death reported to UK Biobank by a relative" ~ 1
+        ),
+        dod_date = case_when(
+            !is.na(date_of_death) ~ as_date(date_of_death),
+            dod == 0 & is.na(date_of_death) ~ as_date("2022-05-31")
+        ),
+        dod_date = case_when(
+            as_date(date_lost_to_follow_up) < dod_date ~ as_date(date_lost_to_follow_up),
+            dod_date > as_date("2022-05-31") ~ as_date("2022-05-31"),
+            TRUE ~ dod_date
+        ),
+
+        # Follow-up time until death in years
+        fu_dod = as.numeric(
+            as_date(dod_date) - as_date(date_of_attending_assessment_centre_instance_0)
+        ) / 365.25,
+
+        # Status for censoring due to leaving UK
+        status = case_when(
+            reason_lost_to_follow_up == "NHS records indicate they have left the UK" ~ 2,
+            reason_lost_to_follow_up == "UK Biobank sources report they have left the UK" ~ 2
+        ),
+
+        # Highest educational attainment using custom function
+        highest_edu = map_chr(qualifications_instance_0, get_highest_edu),
+        highest_edu = factor(highest_edu, levels = edu_levels),
+
+        # Numeric coding of education for analysis
+        educa = case_when(
+            highest_edu == "None of the above" ~ 7,
+            highest_edu == "CSEs or equivalent" ~ 10,
+            highest_edu == "O levels/GCSEs or equivalent" ~ 10,
+            highest_edu == "A levels/AS levels or equivalent" ~ 13,
+            highest_edu == "NVQ or HND or HNC or equivalent" ~ 13,
+            highest_edu == "Other professional qualifications eg: nursing, teaching" ~ 16,
+            highest_edu == "College or University degree" ~ 18,
+            highest_edu == "Prefer not to answer" ~ NA_real_,
+            TRUE ~ NA_real_
+        ),
+
+        # Household income coding
+        income = case_when(
+            average_total_household_income_before_tax_instance_0 == "Less than 18,000"  ~ 0,
+            average_total_household_income_before_tax_instance_0 == "18,000 to 30,999" ~ 1,
+            average_total_household_income_before_tax_instance_0 == "31,000 to 51,999" ~ 2,
+            average_total_household_income_before_tax_instance_0 == "52,000 to 100,000" ~ 3,
+            average_total_household_income_before_tax_instance_0 == "Greater than 100,000" ~ 4,
+            average_total_household_income_before_tax_instance_0 == "Do not know" ~ 5,
+            average_total_household_income_before_tax_instance_0 == "Prefer not to answer" ~ 6
+        ),
+        income = as_factor(income),
+
+        # Risk group creation for combined DM/BMI categories
+        risk_var = case_when(
+            DMall == 0 & bmikat == 0 ~ 1,
+            DMall == 0 & bmikat == 2 ~ 2,
+            DMall == 0 & bmikat == 3 ~ 3,
+            DMall == 1 & bmikat == 0 ~ 4,
+            DMall == 1 & bmikat == 2 ~ 5,
+            DMall == 1 & bmikat == 3 ~ 6
+        ),
+        risk_var = as.factor(risk_var),
+
+        risk_vardm2 = case_when(
+            dm2 == 0 & bmikat == 0 ~ 1,
+            dm2 == 0 & bmikat == 2 ~ 2,
+            dm2 == 0 & bmikat == 3 ~ 3,
+            dm2 == 1 & bmikat == 0 ~ 4,
+            dm2 == 1 & bmikat == 2 ~ 5,
+            dm2 == 1 & bmikat == 3 ~ 6
+        ),
+        risk_vardm2 = as.factor(risk_vardm2)
+    ) %>%
+    filter(fu_ascvd >= 0) # Keep only participants without ASCVD at baseline
+
+#---------------------------------------------
+# RESULTS DATA GENERATION UKB BIOBANK
+#---------------------------------------------
+# Table of baseline characteristics
+
+gtsave(toc(sex_ = 2)[[1]], "ukb_toc_w.html", path = here::here("obdi", "doc/manuscript/results files ukb/"))
+
+gtsave(toc(sex_ = 1)[[1]], "ukb_toc_m.html", path = here::here("obdi", "docs/manuscript/results files ukb/"))
+
+# Distribution table for UK Biobank participants by DMall
+ukb_dist_n <- distribution(dm = "DMall")[[2]]
+write.csv(ukb_dist_n, here::here("doc/manuscript/results files ukb/ukb_dist_n.csv"), row.names = FALSE)
+
+# Cumulative incidence for women (risk_var groups)
+ukb_cum_n_w <- cum_inc_cr(futime = "fu_ascvd", endpoint ="ascvd", by_cat = "risk_var", sex_ =2)[[3]]
+write.csv(ukb_cum_n_w, here::here("doc/manuscript/results files ukb/ukb_cum_n_w.csv"), row.names = FALSE)
+
+# Cumulative incidence for men
+ukb_cum_n_m <- cum_inc_cr(futime = "fu_ascvd", endpoint ="ascvd", by_cat = "risk_var", sex_ =1)[[3]]
+write.csv(ukb_cum_n_m, here::here("doc/manuscript/results files ukb/ukb_cum_n_m.csv"), row.names = FALSE)
+
+# Number of participants by sex
+ukb_n_w <- toc(sex_=2)[[2]]
+write.csv(ukb_n_w, here::here("cvd_obesity_diabetes_ukbrap", "doc/manuscript/results files ukb/ukb_n_w.csv"), row.names = FALSE)
+
+ukb_n_m <- toc(sex_=1)[[2]]
+write.csv(ukb_n_m,  here::here("cvd_obesity_diabetes_ukbrap", "doc/manuscript/results files ukb/ukb_n_m.csv"), row.names = FALSE)
+
+# Follow-up summary (min, max, mean, median) excluding BMI category 1
+ukb_fu <- data %>% filter(bmikat !=1) %>% summarise(min(fu_ascvd), max(fu_ascvd), mean(fu_ascvd), median(fu_ascvd))
+write.csv(ukb_fu, here::here("cvd_obesity_diabetes_ukbrap", "doc/manuscript/results files ukb/ukb_fu.csv"), row.names = FALSE)
+
+# Cox regression results for women
+cox_w <- forestplot_lej(fu= "fu_ascvd", sex_ = 2, endpoint = "ascvd", multifac_adj = FALSE, risk_var = "risk_var")[[3]]
+write.csv(cox_w,  here::here("doc/manuscript/results files ukb/ukb_cox_w.csv"), row.names = FALSE)
+
+# Cox regression results for men
+cox_m <- forestplot_lej(fu= "fu_ascvd", sex_ = 1, endpoint = "ascvd", multifac_adj = FALSE, risk_var = "risk_var")[[3]]
+write.csv(cox_m,  here::here("doc/manuscript/results files ukb/ukb_cox_m.csv"), row.names = FALSE)
+
+# Absolute risk (Poisson regression) for women
+abs_w <- poisson_barplot(dm = dm_c, sex_ = 2, futime = "fu_ascvd", endpoint = "ascvd")[[3]]
+write.csv(abs_w,  here::here("cvd_obesity_diabetes_ukbrap","doc/manuscript/results files ukb/ukb_abs_w.csv"), row.names = FALSE)
+
+# Absolute risk (Poisson regression) for men
+abs_m <- poisson_barplot(dm = dm_c, sex_ = 1, futime = "fu_ascvd", endpoint = "ascvd")[[3]]
+write.csv(abs_m,  here::here("cvd_obesity_diabetes_ukbrap","doc/manuscript/results files ukb/ukb_abs_m.csv"), row.names = FALSE)
+
+# Cumulative incidence curves for women and men
+cuminc_w <- cum_inc_cr(futime = "fu_ascvd", endpoint ="ascvd", by_cat = "risk_var", sex_ =2)[[2]]
+write.csv(cuminc_w, here::here("doc/manuscript/results files ukb/ukb_cuminc_w.csv"), row.names = FALSE)
+
+cuminc_m <- cum_inc_cr(futime = "fu_ascvd", endpoint ="ascvd", by_cat = "risk_var", sex_ =1)[[2]]
+write.csv(cuminc_m, here::here("doc/manuscript/results files ukb/ukb_cuminc_m.csv"), row.names = FALSE)
+
+# Spline function results for women and men
+spline_w <- spline_function(dm = dm_c, sex_ = 2, futime = "fu_ascvd", endpoint = "ascvd")[[2]]
+write.csv(spline_w, here::here("doc/manuscript/results files ukb/ukb_spline_w.csv"), row.names = FALSE)
+
+spline_m <- spline_function(dm = dm_c, sex_ = 1, futime = "fu_ascvd", endpoint = "ascvd")[[2]]
+write.csv(spline_m, here::here("doc/manuscript/results files ukb/ukb_spline_m.csv"), row.names = FALSE)
+
+#---------------------------------------------
+# RESULTS DATA GENERATION CGPS
+#---------------------------------------------
+
+# Load CGPS dataset (done in a secure environment) to run the same functions to generate results
+
+# Table of baseline characteristics
+
+gtsave(toc(sex_ = 2)[[1]], "cgps_toc_w.html", path = here::here("obdi", "doc/manuscript/results files cgps/"))
+
+gtsave(toc(sex_ = 1)[[1]], "cgps_toc_m.html", path = here::here("obdi", "docs/manuscript/results files cgps/"))
+
+# Distribution table for CGPS participants by DMall
+cgps_dist_n <- distribution(dm = "DMall")[[2]]
+write.csv(cgps_dist_n, here::here("doc/manuscript/results files cgps/cgps_dist_n.csv"), row.names = FALSE)
+
+# Cumulative incidence for women (risk_var groups)
+cgps_cum_n_w <- cum_inc_cr(futime = "fu_ascvd", endpoint ="ascvd", by_cat = "risk_var", sex_ =2)[[3]]
+write.csv(cgps_cum_n_w, here::here("doc/manuscript/results files cgps/cgps_cum_n_w.csv"), row.names = FALSE)
+
+# Cumulative incidence for men
+cgps_cum_n_m <- cum_inc_cr(futime = "fu_ascvd", endpoint ="ascvd", by_cat = "risk_var", sex_ =1)[[3]]
+write.csv(cgps_cum_n_m, here::here("doc/manuscript/results files cgps/cgps_cum_n_m.csv"), row.names = FALSE)
+
+# Number of participants by sex
+cgps_n_w <- toc(sex_=2)[[2]]
+write.csv(cgps_n_w, here::here("cvd_obesity_diabetes_cgpsrap", "doc/manuscript/results files cgps/cgps_n_w.csv"), row.names = FALSE)
+
+cgps_n_m <- toc(sex_=1)[[2]]
+write.csv(cgps_n_m,  here::here("cvd_obesity_diabetes_cgpsrap", "doc/manuscript/results files cgps/cgps_n_m.csv"), row.names = FALSE)
+
+# Follow-up summary (min, max, mean, median) excluding BMI category 1
+cgps_fu <- data %>% filter(bmikat !=1) %>% summarise(min(fu_ascvd), max(fu_ascvd), mean(fu_ascvd), median(fu_ascvd))
+write.csv(cgps_fu, here::here("cvd_obesity_diabetes_cgpsrap", "doc/manuscript/results files cgps/cgps_fu.csv"), row.names = FALSE)
+
+# Cox regression results for women
+cox_w <- forestplot_lej(fu= "fu_ascvd", sex_ = 2, endpoint = "ascvd", multifac_adj = FALSE, risk_var = "risk_var")[[3]]
+write.csv(cox_w,  here::here("doc/manuscript/results files cgps/cgps_cox_w.csv"), row.names = FALSE)
+
+# Cox regression results for men
+cox_m <- forestplot_lej(fu= "fu_ascvd", sex_ = 1, endpoint = "ascvd", multifac_adj = FALSE, risk_var = "risk_var")[[3]]
+write.csv(cox_m,  here::here("doc/manuscript/results files cgps/cgps_cox_m.csv"), row.names = FALSE)
+
+# Absolute risk (Poisson regression) for women
+abs_w <- poisson_barplot(dm = dm_c, sex_ = 2, futime = "fu_ascvd", endpoint = "ascvd")[[3]]
+write.csv(abs_w,  here::here("cvd_obesity_diabetes_cgpsrap","doc/manuscript/results files cgps/cgps_abs_w.csv"), row.names = FALSE)
+
+# Absolute risk (Poisson regression) for men
+abs_m <- poisson_barplot(dm = dm_c, sex_ = 1, futime = "fu_ascvd", endpoint = "ascvd")[[3]]
+write.csv(abs_m,  here::here("cvd_obesity_diabetes_cgpsrap","doc/manuscript/results files cgps/cgps_abs_m.csv"), row.names = FALSE)
+
+# Cumulative incidence curves for women and men
+cuminc_w <- cum_inc_cr(futime = "fu_ascvd", endpoint ="ascvd", by_cat = "risk_var", sex_ =2)[[2]]
+write.csv(cuminc_w, here::here("doc/manuscript/results files cgps/cgps_cuminc_w.csv"), row.names = FALSE)
+
+cuminc_m <- cum_inc_cr(futime = "fu_ascvd", endpoint ="ascvd", by_cat = "risk_var", sex_ =1)[[2]]
+write.csv(cuminc_m, here::here("doc/manuscript/results files cgps/cgps_cuminc_m.csv"), row.names = FALSE)
+
+# Spline function results for women and men
+spline_w <- spline_function(dm = dm_c, sex_ = 2, futime = "fu_ascvd", endpoint = "ascvd")[[2]]
+write.csv(spline_w, here::here("doc/manuscript/results files cgps/cgps_spline_w.csv"), row.names = FALSE)
+
+spline_m <- spline_function(dm = dm_c, sex_ = 1, futime = "fu_ascvd", endpoint = "ascvd")[[2]]
+write.csv(spline_m, here::here("doc/manuscript/results files cgps/cgps_spline_m.csv"), row.names = FALSE)
+
+
+
+### FILE: R/functions.R ###
+
+
+
+# FUNCTIONS FOR GENERATING AND PLOTTING RESULTS ---------------------------
+
+
+#' Table of characteristics by sex
+#'
+#' @param sex_ Numeric; 1 for male, 2 for female. Defaults to 1.
+#'
+#' @return A list containing:
+#' - `table`: a gt table of participant characteristics by BMI and diabetes status.
+#' - `ns`: counts of participants and events by diabetes and BMI categories.
+#' @export
+#'
+#' @examples
+toc <- function(sex_ = 1) {
+
+    # Step 1: Filter and recode data
+    data_tbl1 <- data %>%
+        mutate(sex = haven::zap_labels(sex)) %>%           # Remove labels from sex variable
+        filter(sex == sex_) %>%                            # Filter by requested sex
+        select(DMall, alder, bmi, bmikat, dm2, educa, income,
+               v37, ascvd) %>%
+        filter(bmikat != 1) %>%                            # Remove BMI category "1" (if needed)
+        mutate(
+            DMall = case_when(DMall == 0 ~ "No diabetes", DMall == 1 ~ "Diabetes"),
+            DMall = factor(DMall, levels = c("No diabetes", "Diabetes")),
+            bmikat = case_when(bmikat == 0 ~ "Normal weight", bmikat == 2 ~ "Overweight", bmikat == 3 ~ "Obesity"),
+            bmikat = factor(bmikat, levels = c("Normal weight", "Overweight", "Obesity")),
+            dm2 = case_when(dm2 == 0 ~ "0", dm2 == 1 ~ "Type 2 Diabetes Mellitus"),
+            income = case_when(
+                income == 0 ~ "<GBP18,000",
+                income == 1 ~ "GBP18,000-30,999",
+                income == 2 ~ "GBP31,000-51,999",
+                income == 3 ~ "GBP52,000-100,000",
+                income == 4 ~ ">GBP100,000"
+            ),
+            income = factor(income, levels = c("<GBP18,000", "GBP18,000-30,999", "GBP31,000-51,999", "GBP52,000-100,000", ">GBP100,000")),
+            v37 = case_when(v37 == 0 ~ "0", v37 == 1 ~ "Current smokers, %")
+        )
+
+    # Step 2: Count participants and events
+    n <- data_tbl1 %>% group_by(DMall, bmikat) %>% count()
+    n_event <- filter(data_tbl1, ascvd == 1) %>% group_by(DMall, bmikat) %>% count() %>% rename(ascvd = n)
+    ns <- left_join(n, n_event)
+
+    # Step 3: Create stratified summary table
+    table <- data_tbl1 %>%
+        select(-ascvd) %>%
+        tbl_strata(
+            strata = c("DMall"),
+            .tbl_fun = ~ .x %>%
+                tbl_summary(
+                    by = bmikat,
+                    missing = "ifany",
+                    missing_text = "Missing",
+                    digits = list(educa = 0),
+                    type = list(educa ~ "continuous"),
+                    statistic = list(
+                        all_continuous() ~ "{median} ({p25}, {p75})",
+                        all_categorical() ~ "{n} ({p}%)"
+                    ),
+                    label = list(
+                        alder = "Age",
+                        bmi = "Body Mass Index (kg/m<sup>2</sup>)",
+                        dm2 = "Type 2 Diabetes Mellitus",
+                        educa = "Education (years in school)",
+                        income = "Household income before tax",
+                        v37 ~ "Current smokers, %"
+                    )
+                )
+        ) %>%
+        modify_header(label ~ "**Characteristic**") %>%
+        remove_row_type(variables = "dm2", type = "level", level_value = "0") %>%
+        modify_table_body(~ .x |> filter(!(variable %in% "dm2" & row_type %in% "label"))) %>%
+        remove_row_type(variables = "v37", type = "level", level_value = "0") %>%
+        modify_table_body(~ .x |> filter(!(variable %in% "v37" & row_type %in% "label"))) %>%
+        modify_table_body(fun = ~ .x %>% arrange(variable)) %>%
+        modify_column_indent(columns = label) %>%
+        modify_footnote(everything() ~ NA_character_) %>%
+        as_gt() %>%
+        tab_source_note("Continuous variables are shown as median (interquartile range), categorical variables as number (%)")
+
+    return(list(table, ns))
+}
+
+
+#' Distribution plot of BMI by diabetes status, Figure 1
+#'
+#' @param sex_ Numeric; 1 for male, 2 for female.
+#' @param dm Character; variable for diabetes status, default "dm2".
+#'
+#' @return A list containing:
+#' - `plot`: ggplot density plot of BMI by diabetes status
+#' - `dist_ns`: counts of participants by diabetes and sex
+#' @export
+#'
+#' @examples
+distribution <- function(sex_ = 1, dm = "dm2") {
+    data <- data %>% mutate(sex = haven::zap_labels(sex))
+
+    dist_ns <- data %>% group_by(DMall, sex) %>% count()
+
+    plot <- ggplot() +
+        geom_vline(xintercept = c(18.5, 25, 30), color = "grey") +
+        stat_density(data = filter(data, get(dm) == 0, sex == sex_), aes(x = bmi, color = "#66C2A5"), geom = "line") +
+        stat_density(data = filter(data, get(dm) == 1, sex == sex_), aes(x = bmi, color = "#FC8D62"), geom = "line") +
+        scale_color_brewer(palette = "Set2", labels = c("No diabetes", "Diabetes")) +
+        scale_x_continuous(limits = c(15, 50), breaks = c(18.5, 25, 30, 40, 50)) +
+        scale_y_continuous(limits = c(0, 0.13), breaks = c(0.05, 0.10)) +
+        labs(color = "Diabetes status", x = expression(paste("Body Mass Index (kg/", m^2, ")")), y = "Density") +
+        theme_classic() +
+        theme(
+            legend.position = c(0.85, 0.85),
+            legend.title = element_blank(),
+            legend.background = element_rect(size = 0.5, linetype = "solid", color = "black")
+        )
+
+    return(list(plot, dist_ns))
+}
+
+
+#' Cumulative incidence with competing risk, Figure 2
+#'
+#' @param futime Follow-up time variable
+#' @param endpoint Event indicator variable
+#' @param by_cat Grouping variable (bmikat, DMall, risk_var)
+#' @param sex_ Numeric; 1 male, 2 female
+#'
+#' @return List containing:
+#' - `plot`: cumulative incidence plot
+#' - `plotdata_df`: data used for plotting
+#' - `survfit_sum2`: summary table from survfit
+#' @export
+#'
+#' @examples
+cum_inc_cr <- function(futime = "fu_ascvd", endpoint = "ascvd", by_cat = "risk_var", sex_ = 2) {
+    # Step 1: Set labels for plot legend
+    if(by_cat == "bmikat") labels <- c("Normal weight", "Overweight", "Obesity")
+    if(by_cat == "DMall") labels <- c("No diabetes", "Diabetes")
+    if(by_cat == "risk_var") labels <- c(
+        "Normal weight, no diabetes", "Overweight, no diabetes", "Obesity, no diabetes",
+        "Normal weight, diabetes", "Overweight, diabetes", "Obesity, diabetes"
+    )
+    if(by_cat == "risk_vardm2") labels <- labels
+
+    # Step 2: Prepare dataset
+    cumincdata <- data %>% filter(alder >= 40, bmikat != 1, sex == sex_) %>%
+        mutate(
+            ep = case_when(
+                get(endpoint) == 1 ~ 1,
+                dod == 1 ~ 2,
+                status == 2 ~ 3,
+                TRUE ~ 0
+            ),
+            fu_ep = case_when(
+                get(endpoint) == 1 ~ fu_ascvd,
+                dod == 1 ~ fu_dod,
+                dod == 0 & status == 2 ~ fu_dod,
+                TRUE ~ fu_dod
+            )
+        )
+
+    # Step 3: Create summary table from survfit
+    survfit_sum <- summary(survfit(Surv(alder, alder + fu_ep, as_factor(ep)) ~ get(by_cat), data = cumincdata))$table %>% as.data.frame()
+    colnames(survfit_sum) <- c("n", "n_event", "rmean", "sermean")
+    survfit_sum2 <- survfit_sum %>%
+        mutate(group = rownames(survfit_sum), group = str_replace(group, "get\\(by_cat\\)=", "riskvar"))
+    rownames(survfit_sum2) <- NULL
+
+    # Step 4: Plot cumulative incidence
+    plotdata <- survfit(Surv(alder, alder + fu_ep, as_factor(ep)) ~ get(by_cat), data = cumincdata) %>% ggcuminc()
+    plotdata_df <- ggplot_build(plotdata)$data[[1]] %>% select(colour, x, y, group)
+
+    plot <- ggplot(plotdata_df, aes(x = x, y = y, color = as.factor(group))) +
+        geom_step() +
+        scale_x_continuous(limits = c(40, 100)) +
+        scale_y_continuous(limits = c(0, 0.875), labels = scales::number_format(scale = 100)) +
+        scale_color_brewer(palette = "Set2", labels = labels) +
+        labs(x = "Age (years)", y = "Cumulative Incidence (%)") +
+        theme_minimal() +
+        theme(
+            axis.line = element_line(),
+            panel.grid.major.x = element_blank(),
+            panel.grid.minor.x = element_blank(),
+            legend.position = "right",
+            legend.background = element_rect(size = 0.5, linetype = "solid", color = "black")
+        ) +
+        guides(color = guide_legend(ncol = 1, reverse = TRUE))
+
+    return(list(plot, plotdata_df, survfit_sum2))
+}
+
+
+#' Forestplot of Cox regression results, Figure 3
+#'
+#' @param fu Follow-up time variable
+#' @param sex_ Numeric; 1 male, 2 female
+#' @param endpoint Event variable
+#' @param multifac_adj Logical; whether to adjust for multiple covariates
+#' @param risk_var Variable for risk categories
+#'
+#' @return List containing:
+#' - `plot`: forestplot ggplot
+#' - `p_table`: p-values for interaction tests
+#' - `results_data`: detailed Cox regression results
+#' @export
+#'
+#' @examples
+forestplot_lej <- function(fu = "fu_ascvd", sex_ = 2, endpoint = "ascvd", multifac_adj = FALSE, risk_var = "risk_var") {
+    if(endpoint == "ascvd" & sex_ == 1) {x_label = "Hazard ratio (95% confidence interval)\nfor ASCVD in men"}
+    if(endpoint == "ascvd" & sex_ == 2) {x_label = "Hazard ratio (95% confidence interval)\nfor ASCVD in women"}
+
+    if(multifac_adj == FALSE) {formula = paste0("Surv(alder, (alder+ get(fu)), get(endpoint)) ~", risk_var, " + educa + income + v37")}
+    if(multifac_adj == TRUE)  {formula = paste0("Surv(alder, (alder+ get(fu)), get(endpoint)) ~", risk_var, " + educa + income + v37 + ldl + trig + systolic")}
+
+    if(multifac_adj == FALSE) {formula_bmikatnum = "Surv(alder, (alder+ get(fu)), get(endpoint)) ~ bmikat_cox+ educa + income + v37"}
+    if(multifac_adj == TRUE)  {formula_bmikatnum = "Surv(alder, (alder+ get(fu)), get(endpoint)) ~ bmikat_cox+ educa + income + v37 + ldl + trig + systolic"}
+
+    if(multifac_adj == FALSE) {formula_bmikatnumint = "Surv(alder, (alder+ get(fu)), get(endpoint)) ~ bmikat_cox*DMall+ educa + income + v37"}
+    if(multifac_adj == TRUE)  {formula_bmikatnumint = "Surv(alder, (alder+ get(fu)), get(endpoint)) ~ bmikat_cox*DMall+ educa + income + v37 + ldl + trig + systolic"}
+
+    if(multifac_adj == FALSE) {formula_bmicont= "Surv(alder, (alder+ get(fu)), get(endpoint)) ~ bmi+ educa + income + v37"}
+    if(multifac_adj == TRUE)  {formula_bmicont = "Surv(alder, (alder+ get(fu)), get(endpoint)) ~ bmi+ educa + income + v37 + ldl + trig + systolic"}
+
+    if(multifac_adj == FALSE) {formula_bmicontint= "Surv(alder, (alder+ get(fu)), get(endpoint)) ~ bmi*DMall+ educa + income + v37"}
+    if(multifac_adj == TRUE)  {formula_bmicontint = "Surv(alder, (alder+ get(fu)), get(endpoint)) ~ bmi*DMall+ educa + income + v37 + ldl + trig + systolic"}
+
+
+
+    cox_data <- data %>%
+        mutate(sex = haven::zap_labels(sex)) %>%
+        filter(get(fu)>0,
+               sex == sex_,
+               bmikat !=1) %>%
+        mutate(bmikat_cox = case_when(
+            bmikat == 0 ~ 0,
+            bmikat == 2 ~ 1,
+            bmikat == 3 ~2
+        ))
+
+    nodm_bmikat <- coxph(as.formula(formula_bmikatnum), filter(cox_data, DMall == 0))
+
+    dm_bmikat <- coxph(as.formula(formula_bmikatnum), filter(cox_data, DMall == 1))
+
+    interaction_bmikat <- coxph(as.formula(formula_bmikatnumint), cox_data)
+
+    nodm_bmicont <- coxph(as.formula(formula_bmicont), filter(cox_data, DMall == 0))
+
+    dm_bmicont<- coxph(as.formula(formula_bmicont), filter(cox_data, DMall == 1))
+
+    interaction_bmicont <- coxph(as.formula(formula_bmicontint), cox_data)
+
+    p_table <- tibble(
+        p_bmikat_nodm = summary(nodm_bmikat)$coefficients[1,5],
+        p_bmikat_dm = summary(dm_bmikat)$coefficients[1,5],
+        p_int_bmikat_dm = filter(tidy(interaction_bmikat), term == "bmikat_cox:DMall1")$p.value,
+        p_bmicont_nodm = summary(nodm_bmicont)$coefficients[1,5],
+        p_bmicont_dm = summary(dm_bmicont)$coefficients[1,5],
+        p_int_bmicont = filter(tidy(interaction_bmicont), term == "bmi:DMall1")$p.value,
+        est_int_bmikat = filter(tidy(interaction_bmikat), term == "bmikat_cox:DMall1")$estimate,
+        est_int_bmicont = filter(tidy(interaction_bmicont), term == "bmi:DMall1")$estimate) %>%
+        pivot_longer(cols = everything(), names_to = "origin", values_to = "p")
+
+
+    # model check -------------------------------------------------------------
+
+    # #this is the curve mentioned in methods
+    # fit <- survfit(Surv(alder, (alder+get(fu)), get(endpoint)) ~ risk_var , cox_data)
+    #
+    # survminer::ggsurvplot(fit, fun = "cloglog", data = cox_data, xlim = c(40,100))
+    #
+
+    #   -----------------------------------------------------------------------
+
+
+
+    cox_output <- coxph(as.formula(formula), cox_data) %>%
+        tidy(conf.int = TRUE, exponentiate = TRUE) %>%
+        mutate(hrci = sprintf("%.2f (%.2f-%.2f)", estimate, conf.low, conf.high)) %>%
+        bind_rows(tibble(
+            term = "risk_var1",
+            estimate = 1,
+            hrci = "1.00 (1.00-1.00)")) %>%
+        arrange(term) %>%
+        filter(str_starts(term, "risk_var"))
+
+    if(multifac_adj == FALSE) {
+        formula_n = map_int(1:6, ~ nrow(filter(cox_data, risk_var == .x, !is.na(income), !is.na(educa), !is.na(v37))))
+        formula_n_event = map_int(1:6, ~ nrow(filter(cox_data,
+                                                     risk_var == .x, !is.na(income), !is.na(educa), !is.na(v37),
+                                                     .data[[endpoint]] == 1)))}
+    #add bmi cat, dm cat, number of participants and events
+    left_table <- tibble(term =cox_output$term,
+                         bmikat = c("Normal weight", "Overweight", "Obesity", "Normal weight", "Overweight", "Obesity"),
+                         diab = c("No", "No", "No", "Yes", "Yes", "Yes"),
+                         n = formula_n,
+                         n_event =formula_n_event )%>%
+        mutate( n = format(n, big.mark = " "),
+                n_event = format(n_event, big.mark = " "))
+
+    ggdata <- left_join(left_table, cox_output)
+
+    results_data <- ggdata %>%
+        full_join(tibble(term = "int",
+                         p_intcat = filter(tidy(interaction_bmikat), term == "bmikat_cox:DMall1")$p.value,
+                         est_intcat = filter(tidy(interaction_bmikat), term == "bmikat_cox:DMall1")$estimate))
+
+
+    plot <-
+
+        ggplot(ggdata, aes(y = as.numeric(fct_rev(term)), x = estimate))+
+        geom_point()+
+        geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2)+
+        geom_segment(x = 1, xend = 1, y = 0, yend = 6.5, linetype = "dashed")+
+        scale_x_continuous(limits =c(-8, 7.5))+
+        # coord_cartesian(xlim = c(-8, 7.5))+
+        scale_y_continuous(limits = c(-3, 8))+
+        geom_text(aes(x = -8, label = bmikat), hjust = 0)+
+        geom_text(aes(x = -5.5, label = diab), hjust = 0)+
+        geom_text(aes(x = -3.7, label = n), hjust = 0)+
+        geom_text(aes(x = -1.2, label = n_event), hjust = 0)+
+        geom_text(aes(x = 4.5, label = hrci), hjust = 0)+
+
+        annotate("text", x = -8, y = 7, label = "BMI category", fontface = "bold", hjust = 0)+
+        annotate("text", x = -5.5, y = 7, label = "Diabetes", fontface = "bold", hjust = 0)+
+        annotate("text", x = -3.7, y = 7, label = "N, participants", fontface = "bold", hjust = 0)+
+        annotate("text", x = -1.2, y = 7, label = "N, events", fontface = "bold", hjust = 0)+
+        annotate("text", x = 4.5, y = 7, label = "HR (95% CI)", fontface = "bold", hjust = 0)+
+        annotate(
+            "text",
+            x = -8,
+            y = -1,
+            label = ifelse(
+                filter(tidy(interaction_bmikat), term == "bmikat_cox:DMall1")$p.value < 0.01,
+                "P for interaction < 0.01",
+                paste0(
+                    "P for interaction = ",
+                    format(
+                        round(filter(tidy(interaction_bmikat), term == "bmikat_cox:DMall1")$p.value, 2),
+                        nsmall = 2,
+                        trim = TRUE
+                    )
+                )
+            ),
+            hjust = 0,
+            fontface = "italic"
+        )+
+
+        geom_segment(y = 0, yend = 0, x = -0.2, xend = 4.5)+
+        annotate("text", x = 1.8, y = -1.2, label = x_label, hjust = 0.5)+
+        annotate("text", x = c(1, 2, 3, 4), y = -0.4, label = c(1,2,3,4))+
+        geom_point(aes(x = 1, y = 0), shape = 124)+
+        geom_point(aes(x = 2, y = 0), shape = 124)+
+        geom_point(aes(x = 3, y = 0), shape = 124)+
+        geom_point(aes(x = 4, y = 0), shape = 124)+
+        # geom_point(aes(x = 7, y = 0), shape = 124)+
+        # geom_point(aes(x = 9, y = 0), shape = 124)+
+        theme_void()
+
+    ggplot_build(plot)$layout$panel_params[[1]]$x.range
+
+
+    return(list(plot, p_table, results_data))
+}
+
+
+#' Prepare restricted cubic spline data, preparation for next function
+#'
+#' @param dm_type Diabetes variable
+#' @param dm Numeric; 0 = no diabetes, 1 = diabetes
+#' @param sex_ Numeric; 1 male, 2 female
+#' @param futime Follow-up time
+#' @param endpoint Event variable
+#' @param env Environment for storing intermediate results
+#'
+#' @return Data frame suitable for spline plotting
+#' @export
+prep_rcs <- function(dm_type = "dm2", dm = 0, sex_ = 2, futime = "fu_ascvd", endpoint = "ascvd", env = parent.frame()) {
+    if(dm == 0) {suffix = "_dm0"}
+    if(dm == 1) {suffix = "_dm1"}
+
+    rcs_data <- data %>%
+        filter(get(dm_type) == dm, sex == sex_) %>%
+        select(alder, all_of(futime), all_of(endpoint), bmi, all_of(dm_type), educa, income, v37)
+
+    dd <<- datadist(rcs_data)
+
+    env$ndt <- rcs_data
+
+    env$dd <- datadist(env$ndt)
+
+    options(datadist = "dd")
+
+    env$dd$limits["Adjust to", "bmi"] <-18.5
+
+    env$cox_spline_rms <- cph(Surv(alder, (alder + get(futime)), get(endpoint)) ~ rcs(bmi,  3) + educa + income + v37, rcs_data)
+
+    predict_data <- Predict(env$cox_spline_rms, bmi = seq(18.5,  max(rcs_data$bmi, na.rm = TRUE), length.out = 100), ref.zero = TRUE)
+
+    plot_data_rms <- data.frame(bmi = predict_data$bmi, hr = exp(predict_data$yhat), ci_lower = exp(predict_data$lower), ci_upper = exp(predict_data$upper))  %>%
+        mutate(dmgroup = factor(dm) )
+
+    # options(datadist = NULL)
+    #
+    # rm("dd", envir = globalenv())
+
+    return(plot_data_rms)
+}
+
+
+#' Create restricted cubic spline plots, Figure 4
+#'
+#' @param dm Diabetes variable
+#' @param sex_ Numeric; 1 male, 2 female
+#' @param futime Follow-up time
+#' @param endpoint Event variable
+#'
+#' @return List containing:
+#' - `plot`: spline plot
+#' - `ggdata`: data used for plotting
+#' @export
+spline_function <- function(dm = "DMall", sex_ = 1, futime = "fu_ascvd", endpoint = "ascvd", env = parent.frame()) {
+    if(endpoint == "ascvd"){ylab = " atherosclerotic cardiovascular disease"}
+
+    ggdata <- bind_rows(prep_rcs(dm_type = dm, dm=0, sex_ = sex_, futime = futime, endpoint = endpoint, env = parent.frame()), prep_rcs(dm_type = dm, dm=1, sex_ = sex_, futime = futime, endpoint = endpoint, env = parent.frame()))
+
+    plot <- ggplot(ggdata)+
+        # geom_density(data = filter(data, fu_ascvd>0, DMall == 0, sex == 1), aes(y = 0.5+..density..*10, x = bmi), color = "transparent", fill = "#66C2A5", geom = "line", alpha = 0.2)+
+        # geom_density(data = filter(data, fu_ascvd>0, DMall == 1, sex == 1), aes(y = 0.5+..density..*10, x = bmi), color = "transparent", fill = "#FC8D62", geom = "line", alpha = 0.2)+
+        geom_hline(aes(yintercept = 1))+
+        geom_line(aes(x = bmi, y = hr, color = dmgroup), lineend = "round",  linewidth = 0.9 )+
+        geom_ribbon(aes(x = bmi, ymin = ci_lower, ymax = ci_upper, fill = dmgroup),  alpha = 0.2, linetype = "dashed", size = 0.9, show.legend = FALSE)+
+        # geom_line(aes(x = bmi_dm1, y = hr_dm1, color = "Diabetes"), lineend = "round", color = "#FC8D62", size = 0.9)+
+        # geom_ribbon(aes(x = bmi_dm1, ymin = ci_lower_dm1, ymax = ci_upper_dm1), fill =  "#FC8D62",alpha = 0.2, linetype = "dashed", size = 0.9)+
+        coord_cartesian(xlim = c(18.5, 50), ylim = c(0.5, 3), expand = FALSE)+
+        xlab(expression(paste("Body Mass Index (kg/", m^2, ")")))+
+        ylab(paste0("Hazard ratio (95% CI) for \n", ylab))+
+        scale_color_manual(values = c("0" = "#66C2A5", "1" ="#FC8D62"),
+                           labels = c("No diabetes", "Diabetes"))+
+        scale_fill_manual(values = c("0" = "#66C2A5", "1" ="#FC8D62"))+
+        # labs(color = "Legend")+
+        # scale_x_continuous(limits = c(18.5, 50))+
+        # scale_y_continuous(limits = c(0.4, 2))+
+        theme_classic()+
+        theme(
+            legend.title = element_blank(),
+            legend.position = "right",
+            legend.background = element_rect(
+                size = 0.5,
+                linetype = "solid",
+                color = "black"))
+
+    return(list(plot, ggdata))
+}
+
+
+#' Poisson regression for incidence barplot, Figure 5
+#'
+#' @param dm Diabetes variable
+#' @param futime Follow-up time
+#' @param endpoint Event variable
+#' @param sex_ Numeric; 1 male, 2 female
+#'
+#' @return List containing:
+#' - `plot`: barplot of incidence per 1000 person-years
+#' - `table`: gt table with incidence and counts
+#' - `results_table`: detailed predicted incidence table
+#' @export
+poisson_barplot <- function(dm = "DMall", futime = "fu_ascvd", endpoint = "ascvd", sex_ = 2) {
+
+    if(endpoint == "ascvd") {ylab = "Incidence of ASCVD event \nper 1000 person-years"}
+    if(endpoint == "ascvd") {tabletitle = "Incidence of ASCVD event per 1000 person-years (95% confidence interval)"}
+
+    model_data <- data %>%
+        filter(!is.na(bmikat), bmikat != 1,
+               sex == sex_) %>%
+        mutate(py = get(futime))  # person-years
+
+    n <- model_data %>%
+        group_by(bmikat, !!sym(dm)) %>%
+        summarise(
+            n = n(),
+            events = sum(.data[[endpoint]], na.rm = TRUE),
+            .groups = "drop"
+        ) %>%
+        mutate(
+            bmidm = paste0(as.character(bmikat), as.character(!!sym(dm)))
+        )
+
+    poisson_model <- glm(
+        formula = as.formula(paste0(endpoint, " ~ bmikat *factor(", dm, ") + alder")),
+        family = quasipoisson(link = "log"),
+        data = model_data,
+        offset = log(py)
+    )
+
+    # Step 2: Create new data for predictions
+    predict_data <- expand.grid(
+        bmikat = c(0, 2, 3),        # Normal, Overweight, Obesity
+        value = factor(c(0, 1)),            # No diabetes, diabetes
+        alder = 60,           # Centered at age 60
+        py = 1                      # Setting to 1 so predicted rate equals rate per person-year
+    )
+
+    predict_data <- setNames(predict_data, c("bmikat", dm, "alder", "py"))
+    # Step 3: Predict incidence (per person-year), then scale
+    pred <- predict(poisson_model, newdata = predict_data, type = "response", se.fit = TRUE)
+
+    predict_data <- predict_data %>%
+        mutate(
+            pred_rate = pred$fit,
+            se_rate = pred$se.fit,
+            incidence1000 = pred_rate * 1000,
+            ci_low = (pred_rate - 1.96 * se_rate) * 1000,
+            ci_high = (pred_rate + 1.96 * se_rate) * 1000
+        )
+
+    # Step 4: Add labels for plotting
+    predict_data <- predict_data %>%
+        mutate(
+            bmi_lab = case_when(
+                bmikat == 0 ~ "Normal weight",
+                bmikat == 2 ~ "Overweight",
+                bmikat == 3 ~ "Obesity"
+            ),
+            bmi_lab = factor(bmi_lab, levels = c("Normal weight", "Overweight", "Obesity")),
+            dm_lab = case_when(
+                get(dm) == 0 ~ "No diabetes",
+                get(dm) == 1 ~ "Diabetes"
+            ),
+            bmidm = paste0(as.character(bmikat), as.character(DMall))
+        )
+
+    # Optional: Plot (similar style to before)
+    plot <- ggplot(predict_data, aes(x = bmi_lab, y = incidence1000, fill = factor(!!sym(dm)))) +
+        geom_col(position = position_dodge(width = 0.9), color = "black") +
+        geom_errorbar(aes(ymin = ci_low, ymax = ci_high), stat = "identity", position = position_dodge(width = 0.9), width = 0.4)+
+        labs(y = ylab) +
+        scale_y_continuous(limits = c(0, 45.5))+
+        theme_minimal()+
+        scale_fill_manual(values = c("0" = "#66C2A5", "1" = "#FC8D62"),
+                          labels = c("No diabetes", "Diabetes")) +
+        theme(axis.title.x = element_blank(),
+              legend.title = element_blank(),
+              legend.position = "right",
+              legend.background = element_rect(
+                  size = 0.5,
+                  linetype = "solid",
+                  color = "black"))
+
+
+    table_pre <- left_join(predict_data, n) %>%
+        mutate(in_ci = paste0(
+            format(round(incidence1000, 1), nsmall = 1, trim = TRUE),
+            " (",
+            format(round(ci_low, 1), nsmall = 1, trim = TRUE),
+            "-",
+            format(round(ci_high, 1), nsmall = 1, trim = TRUE),
+            ")"
+        ),
+        n_nevent = paste0(format(n, big.mark = ",", trim = TRUE), "/",format(events, big.mark = ",", trim = TRUE)))
+
+    results_table <- table_pre %>%
+        select(bmikat, DMall, bmidm, incidence1000, ci_low, ci_high, in_ci, n ,events)
+
+    table <- table_pre %>%
+        select(bmi_lab, dm_lab, in_ci, n_nevent) %>%
+        pivot_longer(cols = c(in_ci, n_nevent), names_to = "type", values_to = "value") %>%
+        pivot_wider(names_from = dm_lab, values_from= value) %>%
+        arrange(type) %>%
+        mutate(type_titles = case_when(
+            type == "in_ci" ~ tabletitle,
+            type == "n_nevent" ~ "Number of individuals/events"
+        )) %>%
+        # filter(type == "in_ci") %>%
+        select(-type) %>%
+        gt(groupname_col = "type_titles") %>%
+        tab_style(style = cell_fill(color ="lightblue"),
+                  locations = cells_row_groups(groups = 1)) %>%
+        tab_style(style = cell_fill(color ="lightblue"),
+                  locations = cells_row_groups(groups = 2)) %>%
+        tab_style(style = cell_text(align = "center"),
+                  locations = cells_row_groups()) %>%
+
+        cols_label(bmi_lab = "BMI category") %>%
+        tab_style(style = cell_text(weight = "bold"),
+                  locations = cells_column_labels())
+
+    return(list(plot, table, results_table))
+}
+
+#' Find the highest level of education from a string of education choices
+#'
+#' @param ed_str Character string of education levels separated by "|"
+#'
+#' @return The highest education level as a character, or NA if missing
+#' @export
+#'
+#' @examples
+#' get_highest_edu("highschool|bachelor|master")
+#' get_highest_edu(NA)
+#' get_highest_edu("")
+get_highest_edu <- function(ed_str) {
+
+    # Step 1: Handle missing or blank values
+    if (is.na(ed_str) || ed_str == "") return(NA_character_)
+
+    # Step 2: Split the string into separate education choices
+    # Example: "highschool|bachelor|master" -> c("highschool", "bachelor", "master")
+    choices <- str_split(ed_str, "\\|")[[1]]
+
+    # Step 3: Match the choices against a predefined vector of education levels
+    # edu_levels should be defined elsewhere, e.g., c("none", "primary", "highschool", "bachelor", "master", "phd")
+    matches <- match(choices, edu_levels)
+
+    # Step 4: Drop NA matches and select the highest-ranked level
+    best_i <- max(matches, na.rm = TRUE)
+
+    # Step 5: If no valid match is found, return NA
+    if (is.infinite(best_i)) return(NA_character_)
+
+    # Step 6: Return the corresponding education level from edu_levels
+    edu_levels[best_i]
+}
+
+

@@ -108,7 +108,8 @@ data <- dataset %>%
         # Smoking status (current smoker = 1)
         v37 = case_when(
             str_detect(current_tobacco_smoking_instance_0, "^(Yes|Only)") ~ 1,
-            TRUE ~ 0
+            str_detect(current_tobacco_smoking_instance_0, "No") ~ 0,
+            TRUE ~ NA
         ),
 
         # Encode sex as numeric (Male=1, Female=2)
